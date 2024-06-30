@@ -1,6 +1,5 @@
 import altair as alt
-# import datetime
-import joblib
+import datetime
 import nltk
 import numpy as np
 import pandas as pd
@@ -9,10 +8,13 @@ import streamlit as st
 import time
 import io
 import pdfkit
+import docx2txt
+import subprocess
 import PyPDF2  # Required for reading PDF files
 import docx  # Required for reading DOCX files
 import matplotlib.pyplot as plt
 from gensim.corpora import Dictionary
+from PyPDF2.errors import PdfReadError
 from gensim.models import KeyedVectors, TfidfModel
 from gensim.similarities import SoftCosineSimilarity, SparseTermSimilarityMatrix
 from gensim.similarities.annoy import AnnoyIndexer
@@ -20,12 +22,19 @@ from io import BytesIO
 from nltk import pos_tag, word_tokenize
 from nltk.corpus import stopwords, wordnet
 from nltk.stem import PorterStemmer, WordNetLemmatizer
-from pandas.api.types import is_categorical_dtype, is_numeric_dtype
+from pandas.api.types import is_numeric_dtype
+from keras.src.utils.numerical_utils import to_categorical
+import pytesseract
 from PIL import Image
 from scipy.sparse import csr_matrix, hstack
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelEncoder
+from keras.src.saving.saving_api import load_model
+import pickle
+from keras.src.utils.sequence_utils import pad_sequences
+
+
 
 nltk.download('averaged_perceptron_tagger')
 nltk.download('punkt')
@@ -36,6 +45,49 @@ stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 stemmer = PorterStemmer()
 
+def read_resumes(file):
+    resumes = []
+
+    if file.type == 'application/pdf':
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file.read()))
+        for page_num in range(len(pdf_reader.pages)):
+            text = pdf_reader.pages[page_num].extract_text()
+            resumes.append(text)
+
+    elif file.type in ['image/png', 'image/jpeg', 'image/jpg']:
+        image = Image.open(io.BytesIO(file.read()))
+        text = image_to_text(image)
+        resumes.append(text)
+
+    elif file.type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        text = docx2txt.process(io.BytesIO(file.read()))
+        resumes.append(text)
+
+    elif file.type == 'text/plain':
+        text = file.read().decode('utf-16', 'ignore')
+        resumes.append(text)
+
+    elif file.type == 'application/msword':
+        # If textract cannot handle DOC files, consider alternatives like antiword:
+        # text = textract.process(file.read())
+            # Assuming antiword is installed
+        process = subprocess.Popen(['antiword', '-'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        output, _ = process.communicate(file.read())
+        text = output.decode('utf-8')
+        resumes.append(text)
+
+
+    elif file.type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        excel_df = pd.read_excel(io.BytesIO(file.read()))
+        for column in excel_df.columns:
+            resumes.extend(excel_df[column].astype(str))
+
+    return pd.DataFrame({'Resume': resumes})
+
+def image_to_text(image):
+    # Convert image to text using OCR (Optical Character Recognition)
+    text = pytesseract.image_to_string(image)
+    return text
 
 def clickRank():
     st.session_state.processRank = True
@@ -52,91 +104,6 @@ def convertDfToXlsx(df):
     processedData = output.getvalue()
     return processedData
 
-def filterDataframeClf(df: pd.DataFrame) -> pd.DataFrame:
-    modify = st.toggle("Add filters", key = 'filter-clf-1')
-    if not modify:
-        return df
-    df = df.copy()
-    modificationContainer = st.container()
-    with modificationContainer:
-        toFilterColumns = st.multiselect("Filter table on", df.columns, key = 'filter-clf-2')
-        for column in toFilterColumns:
-            left, right = st.columns((1, 20))
-            left.write("↳")
-            widgetKey = f'filter-clf-{toFilterColumns.index(column)}-{column}'
-            if is_categorical_dtype(df[column]):
-                userCatInput = right.multiselect(
-                    f'Values for {column}',
-                    df[column].unique(),
-                    default = list(df[column].unique()),
-                    key = widgetKey 
-                )
-                df = df[df[column].isin(userCatInput)]
-            elif is_numeric_dtype(df[column]):
-                _min = float(df[column].min())
-                _max = float(df[column].max())
-                step = (_max - _min) / 100
-                userNumInput = right.slider(
-                    f'Values for {column}',
-                    min_value = _min,
-                    max_value = _max,
-                    value = (_min, _max),
-                    step = step,
-                    key = widgetKey 
-                )
-                df = df[df[column].between(*userNumInput)]
-            else:
-                userTextInput = right.text_input(
-                    f'Enter the Keywords in the {column}',
-                    key = widgetKey 
-                )
-                if userTextInput:
-                    userTextInput = userTextInput.lower()
-                    df = df[df[column].astype(str).str.lower().str.contains(userTextInput)]
-    return df
-
-def filterDataframeRnk(df: pd.DataFrame) -> pd.DataFrame:
-    modify = st.toggle("Add filters", key = 'filter-rnk-1')
-    if not modify:
-        return df
-    df = df.copy()
-    modificationContainer = st.container()
-    with modificationContainer:
-        toFilterColumns = st.multiselect("Filter table on", df.columns, key = 'filter-rnk-2')
-        for column in toFilterColumns:
-            left, right = st.columns((1, 20))
-            left.write("↳")
-            widgetKey = f'filter-rnk-{toFilterColumns.index(column)}-{column}'
-            if is_categorical_dtype(df[column]):
-                userCatInput = right.multiselect(
-                    f'Values for {column}',
-                    df[column].unique(),
-                    default = list(df[column].unique()),
-                    key = widgetKey
-                )
-                df = df[df[column].isin(userCatInput)]
-            elif is_numeric_dtype(df[column]):
-                _min = float(df[column].min())
-                _max = float(df[column].max())
-                step = (_max - _min) / 100
-                userNumInput = right.slider(
-                    f'Values for {column}',
-                    min_value = _min,
-                    max_value = _max,
-                    value = (_min, _max),
-                    step = step,
-                    key = widgetKey
-                )
-                df = df[df[column].between(*userNumInput)]
-            else:
-                userTextInput = right.text_input(
-                    f'Enter the Keywords in the {column}',
-                    key = widgetKey
-                )
-                if userTextInput:
-                    userTextInput = userTextInput.lower()
-                    df = df[df[column].astype(str).str.lower().str.contains(userTextInput)]
-    return df
 
 def getWordnetPos(tag):
     if tag.startswith('J'):
@@ -179,11 +146,16 @@ def performStemming(text):
     return text 
 
 def loadModel():
-    model_path = 'svm_model.joblib'
-    model = joblib.load(model_path)
+    # Load the model
+    model = load_model('resumescreening.h5')
     return model
 
 model = loadModel()
+
+def load_tokenizer(tokenizer_path):
+    with open(tokenizer_path, 'rb') as handle:
+        tokenizer = pickle.load(handle)
+    return tokenizer
 
 def rankResumes(text, df):
     progressBar = st.progress(0)
@@ -199,9 +171,6 @@ def rankResumes(text, df):
     progressBar.progress(38, text="Calculating TF-IDF vectors...")
     tfidf_vectors = tfidf[[dictionary.doc2bow(resume) for resume in df['cleanedResume']]]
     query_vector = tfidf[dictionary.doc2bow(jobDescriptionText)]
-    
-    # Load the SVM model
-    svm_model = joblib.load('svm_model.joblib')
 
     progressBar.progress(50, text="Calculating similarity scores...")
     similarities = []
@@ -250,6 +219,21 @@ def addZeroFeatures(matrix):
         matrix = hstack([matrix, zeroFeatures])
     return matrix
 
+def cleanResume(resumeText):
+    resumeText = re.sub('http\S+\s*', ' ', resumeText)  # remove URLs
+    resumeText = re.sub('RT|cc', ' ', resumeText)  # remove RT and cc
+    resumeText = re.sub('#\S+', '', resumeText)  # remove hashtags
+    resumeText = re.sub('@\S+', '  ', resumeText)  # remove mentions
+    resumeText = re.sub('[%s]' % re.escape("""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""), ' ', resumeText)  # remove punctuations
+    resumeText = re.sub(r'[^\x00-\x7f]',r' ', resumeText) 
+    resumeText = re.sub('\s+', ' ', resumeText)  # remove extra whitespace
+
+    words = resumeText.split()
+    words = [word for word in words if word.lower() not in stop_words]
+    words = [stemmer.stem(word.lower()) for word in words if word.lower() not in stop_words]
+    resumeText = ' '.join(words)
+    return resumeText
+
 def createBarChart(df):
     valueCounts = df['Industry Category'].value_counts().reset_index()
     valueCounts.columns = ['Industry Category', 'Count']
@@ -267,29 +251,6 @@ def createBarChart(df):
     )
     return barChart
 
-def loadTfidfVectorizer():
-    tfidfVectorizerFileName = f'tfidf_vectorizer.joblib' 
-    return joblib.load(tfidfVectorizerFileName)
-
-def loadLabelEncoder():
-    labelEncoderFileName = f'label_encoder.joblib'
-    return joblib.load(labelEncoderFileName)
-
-def cleanResume(resumeText):
-    resumeText = re.sub('http\S+\s*', ' ', resumeText)  # remove URLs
-    resumeText = re.sub('RT|cc', ' ', resumeText)  # remove RT and cc
-    resumeText = re.sub('#\S+', '', resumeText)  # remove hashtags
-    resumeText = re.sub('@\S+', '  ', resumeText)  # remove mentions
-    resumeText = re.sub('[%s]' % re.escape("""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""), ' ', resumeText)  # remove punctuations
-    resumeText = re.sub(r'[^\x00-\x7f]',r' ', resumeText) 
-    resumeText = re.sub('\s+', ' ', resumeText)  # remove extra whitespace
-
-    words = resumeText.split()
-    words = [word for word in words if word.lower() not in stop_words]
-    words = [stemmer.stem(word.lower()) for word in words if word.lower() not in stop_words]
-    resumeText = ' '.join(words)
-    return resumeText
-
 def classifyResumes(df):
     progressBar = st.progress(0)
     progressBar.progress(0, text="Preprocessing data ...")
@@ -298,32 +259,44 @@ def classifyResumes(df):
     df['cleanedResume'] = df['Resume'].apply(lambda x: performStemming(x))
     resumeText = df['cleanedResume'].values
     
-    progressBar.progress(20, text="Extracting features ...")
-    vectorizer = loadTfidfVectorizer()
-    wordFeatures = vectorizer.transform(resumeText)
-    wordFeaturesWithZeros = addZeroFeatures(wordFeatures)
+    # Load the model
+    model = load_model('resumescreening.h5')
+
+    # Load the tokenizer
+    tokenizer = load_tokenizer('tokenizer.pickle')
     
-    # Load the SVM model using joblib
-    svm_model = joblib.load('svm_model.joblib')
+    # Tokenize and pad the sequences
+    sequences = tokenizer.texts_to_sequences(resumeText)
+    padded_sequences = pad_sequences(sequences, maxlen=200, padding='post')
+
+    num_resumes = padded_sequences.shape[0]  # Get the number of resumes
+    sequence_length = padded_sequences.shape[1]  # Get the sequence length (should be 200)
+
+    # Reshape padded_sequences to match the expected input shape for LSTM
+    padded_sequences = padded_sequences.reshape((num_resumes, sequence_length, -1))
+    # Check the shape of the padded_sequences
+    st.write(f'Padded sequences shape: {padded_sequences.shape}')
+    
+    progressBar.progress(20, text="Extracting features ...")
     
     progressBar.progress(60, text="Predicting categories ...")
-    # Predict categories using the loaded SVM model
-    predictedCategories = svm_model.predict(wordFeaturesWithZeros)
+    
+    # Predict categories using the loaded model
+    predicted_probabilities = model.predict(padded_sequences)
+    predicted_categories = predicted_probabilities.argmax(axis=1)
+
     
     progressBar.progress(80, text="Finishing touches ...")
     
-    # Load the LabelEncoder
-    le = loadLabelEncoder()
-    
+    # Load the LabelEncoder object
+    with open('label_encoder.pkl', 'rb') as f:
+        le = pickle.load(f)
 
-    # Assign a default label for unseen categories
-    default_label = 'Unknown'
-    predictedLabels = [default_label if label not in le.classes_ else label for label in predictedCategories]
-    
-    df['Industry Category'] = predictedLabels
+    # Assuming `df` is your DataFrame
+    df['Industry Category'] = le.inverse_transform(predicted_categories)
     df['Industry Category'] = pd.Categorical(df['Industry Category'])
     df.drop(columns=['cleanedResume'], inplace=True)
-    
+
     endTime = time.time()
     elapsedSeconds = endTime - startTime
     hours, remainder = divmod(int(elapsedSeconds), 3600)
