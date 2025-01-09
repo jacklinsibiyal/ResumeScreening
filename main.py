@@ -19,10 +19,7 @@ st.markdown(backgroundPattern, unsafe_allow_html=True)
 st.write("""
 # RESUME SCREENING TOOL
 """)
-st.caption("""
-Using Support Vector Machine (SVM) algorithm
-######
-""")
+
 
 tab1, tab2 = st.tabs(['Rank', 'Classify'])
 
